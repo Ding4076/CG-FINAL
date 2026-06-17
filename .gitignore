@@ -1,0 +1,17 @@
+# build output
+build/
+out/
+*.exe
+*.obj
+*.pdb
+*.ilk
+
+# IDE
+.vs/
+.vscode/
+CMakeUserPresets.json
+CMakeSettings.json
+
+# OS
+Thumbs.db
+.DS_Store
