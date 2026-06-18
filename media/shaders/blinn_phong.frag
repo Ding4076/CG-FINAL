@@ -118,9 +118,12 @@ void main() {
     vec3 V = normalize(uViewPos - vWorldPos);
     vec3 albedo = uHasTexture ? texture(uTexture, vTexCoord).rgb : uKd;
 
-    // Hemisphere ambient: blend sky/ground by normal's up-ness.
+    // Hemisphere ambient: blend sky/ground by normal's up-ness, plus a constant
+    // fill so faces no direct light reaches (e.g. arena walls facing away from
+    // the key light) read as grey instead of pure black. The fill is kept modest
+    // so shadow contrast on lit faces (dominated by diffuse+spec) is preserved.
     float upMix = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 ambient = 0.2 * mix(uGroundColor, uSkyColor, upMix) * albedo;
+    vec3 ambient = (0.3 * mix(uGroundColor, uSkyColor, upMix) + 0.08) * albedo;
 
     vec3 result = ambient;
 

@@ -36,13 +36,14 @@ cd build/bin/Release   # 或 build/Release，取决于生成器
 4. 几何变换（旋转/平移/缩放）
 5. 多光源（directional + point + spot + hemisphere），可编辑位置/光强
 6. 摄像机漫游（FPS + Orbit，zoom/pan/orbit/zoomToFit）
-7. OBJ 序列动画 + 截图（Task 9，待做）
+7. OBJ 序列动画（开场变形球动画）+ F2 截图（Task 9，已完成）
 
-**额外 4 项：**
+**额外 5 项：**
 - 自研 NURBS 曲线（不用 GLU 接口，Cox-de Boor 基函数）
 - 实时阴影（directional + spotlight，shadow mapping + PCF）
 - 漫游碰撞检测（sphere-AABB 玩家 vs 障碍物 + sphere-sphere 靶子互斥）
 - 完整三维游戏（双模式、武器、计分、排行榜、暂停菜单、HUD）
+- 场景 OBJ 导出（F1 面板 "Export scene to .obj" 按钮，自研 saveObj）
 
 ## 工程结构（助教要求的"从零搭建"）
 ```
@@ -60,11 +61,18 @@ docs/           设计文档 + 实施计划（含进度、待办、已知 bug）
 - **设计**：`docs/superpowers/specs/2026-06-17-final-project-aimtrainer-design.md`
 - **实施计划 + 进度 + 待办 + 已知 bug**：`docs/superpowers/plans/2026-06-17-final-project-aimtrainer.md`
 
-## 待办（详见实施计划文档）
-- 音效文件（`media/sounds/pistol.wav` / `sniper.wav` / `pop.wav`，CC0）
-- 武器 viewmodel + 开火动画 + 贴图
-- Task 9：开场 OBJ 序列动画 + 截图
-- 已知 bug：光照叠加、背光面全黑、Wild 随机轨迹、靶子可能在视野外生成
+## 操作
+- **开场动画**：启动时播放一段 OBJ 序列动画（变形球，顶点逐帧变化，非变换），
+  ~5 秒后自动进入游戏；任意键 / 左键 / 空格可跳过。
+- **F2**：随时截图，保存为 `media/screenshots/shot_XXX.png`（自上而下编号）。
+- **F1 → Capture/Export**：`Export scene to .obj` 把当前场景（障碍物 + 平台 +
+  斜坡 + 存活靶子）合并导出为单个 `media/exports/scene.obj`（自研 saveObj）。
+
+## 待办（剩余打磨项）
+- 武器 viewmodel + 开火动画 + 贴图（目前用准星 + 粒子枪口火花代替）
+- 天空盒（base 框架已含 Skybox，需补 6 面 cubemap 贴图）
+- 已知小问题：spot 光与半球环境光的叠加可继续微调；Wild 模式 NURBS 轨迹仍为
+  固定控制点（可改为每局随机）
 
 ## 技术栈
 C++17 · CMake · OpenGL 3.3 core · GLFW · glad · GLM · Dear ImGui · stb_image · miniaudio

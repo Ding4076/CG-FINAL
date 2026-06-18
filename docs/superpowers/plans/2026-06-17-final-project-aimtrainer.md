@@ -14,8 +14,8 @@
 - ✅ Task 6 DONE (hand-written NURBS, clamped + periodic, seamless loop)
 - ✅ Task 7 DONE (collision: sphere-AABB player vs railing/crates/walls; sphere-sphere wild repulsion; ramps+platform with height system)
 - ✅ Task 8 DONE (gameplay: Standard + Wild modes, pistol/sniper weapons, ray-sphere hit, particle bursts, scoring + in-memory leaderboard, round-over modal, F1 pause menu, scope zoom + circular mask, top-center 0.01s timer, fullscreen toggle, mouse-sensitivity slider, Exit Game button)
-- ⏳ Task 9 PENDING (OBJ-sequence opening animation + F2 screenshot) — base req 7
-- ⏳ Task 10 PENDING (skybox, OBJ export UI, polish, report)
+- ✅ Task 9 DONE (OBJ-sequence opening animation: self-contained `ObjSequence` generates 30 deforming-sphere frames to disk on first run, reads them back, plays the cutscene before the game; F2 screenshot via glReadPixels -> stb_image_write PNG; intro is skippable + auto-advances) — base req 7
+- ⏳ Task 10 PARTIAL (OBJ-export button DONE — merges scene meshes into `media/exports/scene.obj` via self-written saveObj; lighting ambient-fill tweak so unlit faces aren't pure black; 3 synthesized SFX wavs DONE. STILL PENDING: skybox cubemap, report)
 - Build: `cmake --preset default` then `cmake --build out/build/default --config Release --target finalproject`
 - Run from the exe dir (double-click works): `out/build/default/projects/finalproject/Release/finalproject.exe`
 - Known gotcha: this machine's bash PATH has no `cmake`/`ninja`; use the VS-bundled cmake at `/c/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe` and the `default` (VS generator) preset.
@@ -23,16 +23,14 @@
 - miniaudio.h is present (fetched); audio code + load() calls are wired. Needs wav files (see TODO).
 
 **REMAINING WORK (TODO for the next session/contributor):**
-- **SFX (no assets yet):** drop `pistol.wav`, `sniper.wav`, `pop.wav` into
-  `projects/finalproject/media/sounds/` (CC0 from pixabay.com/sound-effects ,
-  freesound.org, or opengameart.org). Code already loads + plays them; missing
-  files fail silently. (User wanted a CS2-USP-like silenced pistol sound.)
+> **Update (continuation pass):** SFX DONE (3 synthesized wavs in `media/sounds/`),
+> Task 9 DONE (OBJ-sequence intro + F2 screenshot), OBJ-export button DONE
+> (`media/exports/scene.obj`), lighting ambient-fill tweak DONE. Remaining bullets
+> below are the still-open items.
 - **Weapon viewmodel + fire animation + textures:** no art assets yet. See the
   'Textures / materials' section below for how to add albedo PNGs and wire them.
-- **Task 9:** OBJ-sequence opening animation (read frame_XXX.obj, swap mesh) +
-  F2 screenshot (glReadPixels -> PNG via stb_image_write). base req 7.
-- **Task 10:** skybox, 'export scene to .obj' button, difficulty tuning, report.
-- See 'Known issues to fix later (logged)' below for the bug list.
+- **Task 10 (remaining):** skybox cubemap (base `Skybox` is present, needs 6-face
+  texture), difficulty tuning, report.
 
 **Textures / materials (for a later contributor):**
 - The renderer uses Blinn-Phong (one diffuse/albedo texture via `uTexture`), NOT
