@@ -10,6 +10,7 @@
 #include "glsl_program.h"
 #include "model.h"
 #include "nurbs.h"
+#include "obj_sequence.h"
 #include "particle_system.h"
 #include "texture2d.h"
 
@@ -93,6 +94,16 @@ private:
     int _windowedX = 0, _windowedY = 0;    // last windowed pos/size (to restore)
     int _windowedW = 1280, _windowedH = 720;
 
+    // Opening cutscene (base req 7): a deforming-sphere OBJ sequence plays once
+    // on launch, then hands off to the game. Skippable (any key/click) or auto.
+    bool _intro = true;
+    ObjSequence _introSeq;
+    float _introTime = 0.0f;
+
+    bool _screenshotQueued = false;        // F2 pressed -> grab the frame at end of render
+    std::string _lastScreenshot;           // last saved PNG path (shown in the UI)
+    std::string _lastExport;               // last exported .obj path (shown in the UI)
+
 
     // Arena obstacles for collision (bonus: real-time collision). Each obstacle
     // has an AABB for physics and a Model for rendering.
@@ -169,6 +180,16 @@ private:
     };
     std::vector<SpLight> _spots;
 
+    // Player flashlight: a spotlight attached to the camera that shines outward
+    // along the view direction (bonus: real-time, editable spotlight). 'L' toggles
+    // it; lives in shader slot uSpots[1] (the arena spot keeps slot 0).
+    struct FlashLight {
+        bool on = false;
+        glm::vec3 color{1.0f, 0.95f, 0.82f};
+        float intensity = 1.8f;
+        float cosAngle = 0.86f;   // ~30 deg half-angle
+    } _flash;
+
     float _angle = 0.0f;
     bool _showUi = false;    // F1 opens the pause/control panel
 
@@ -202,4 +223,10 @@ private:
     void drawRoundOverModal();          // big centered result + buttons
     void restartRound();                // resetRound + re-aim at the center target
     void toggleFullscreen();            // switch exclusive fullscreen <-> windowed
+
+    // --- Intro / capture / export (Task 9 + Task 10) ---
+    void renderIntro();                 // deforming-sphere OBJ-sequence cutscene
+    void drawIntroOverlay();            // title + "press any key" text
+    void captureScreenshot();           // F2: glReadPixels -> PNG via stb_image_write
+    void exportSceneObj();              // merge scene meshes -> one .obj (base req 2)
 };
