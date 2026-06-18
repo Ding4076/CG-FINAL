@@ -58,6 +58,7 @@ docs/           设计文档 + 实施计划（含进度、待办、已知 bug）
 ```
 
 ## 文档
+- **操作手册（玩法 / 键鼠 / F1 面板 / 调试）**：[docs/操作手册.md](docs/操作手册.md)
 - **设计**：`docs/superpowers/specs/2026-06-17-final-project-aimtrainer-design.md`
 - **实施计划 + 进度 + 待办 + 已知 bug**：`docs/superpowers/plans/2026-06-17-final-project-aimtrainer.md`
 
