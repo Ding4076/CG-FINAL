@@ -4,12 +4,18 @@
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
+#include "obj_loader.h"
 #include "orbit_camera.h"
 #include "primitives.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/random.hpp>
+#include <stb_image_write.h>
+
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
 
 AimTrainer::AimTrainer(const Options& options)
     : Application(options),
@@ -92,6 +98,12 @@ AimTrainer::AimTrainer(const Options& options)
     _groundPlane->transform.position = {0.5f, 0.0f, 0.0f};
 
     initShadowMap();
+
+    // Opening cutscene: a deforming-sphere OBJ sequence (base req 7). The frames
+    // are generated on first run if missing, then read back from disk.
+    if (!_introSeq.loadOrGenerate(getAssetFullPath("models/seq/"), 30, 12)) {
+        _intro = false;   // generation/load failed -> skip straight to the game
+    }
 
     _fps = std::make_unique<FpsCamera>(&_camera, _window);
     _orbit = std::make_unique<OrbitCamera>(&_camera);
@@ -274,21 +286,36 @@ void AimTrainer::setLightUniforms() {
     }
     _bpShader->setUniformInt("uPointCount", ptCount);
 
+    // Spot lights. Slot 0 is always the arena spot (emitted with intensity 0 when
+    // off, so its index is stable and the shadow logic stays anchored to slot 0).
+    // Slot 1 is the player flashlight -- a spotlight attached to the camera that
+    // casts outward along the view direction ('L' to toggle).
     int spCount = 0;
-    for (size_t i = 0; i < _spots.size(); ++i) {
-        if (!_spots[i].on) {
-            continue;
-        }
-        std::string base = "uSpots[" + std::to_string(spCount) + "]";
-        _bpShader->setUniformVec3(base + ".position", _spots[i].position);
-        _bpShader->setUniformVec3(base + ".direction", _spots[i].direction);
-        _bpShader->setUniformVec3(base + ".color", _spots[i].color);
-        _bpShader->setUniformFloat(base + ".intensity", _spots[i].intensity);
-        _bpShader->setUniformFloat(base + ".cosAngle", _spots[i].cosAngle);
-        _bpShader->setUniformFloat(base + ".kc", _spots[i].kc);
-        _bpShader->setUniformFloat(base + ".kl", _spots[i].kl);
-        _bpShader->setUniformFloat(base + ".kq", _spots[i].kq);
-        ++spCount;
+    if (!_spots.empty()) {
+        const SpLight& s = _spots[0];
+        std::string base = "uSpots[0]";
+        _bpShader->setUniformVec3(base + ".position", s.position);
+        _bpShader->setUniformVec3(base + ".direction", s.direction);
+        _bpShader->setUniformVec3(base + ".color", s.color);
+        _bpShader->setUniformFloat(base + ".intensity", s.on ? s.intensity : 0.0f);
+        _bpShader->setUniformFloat(base + ".cosAngle", s.cosAngle);
+        _bpShader->setUniformFloat(base + ".kc", s.kc);
+        _bpShader->setUniformFloat(base + ".kl", s.kl);
+        _bpShader->setUniformFloat(base + ".kq", s.kq);
+        spCount = 1;
+    }
+    if (_flash.on) {
+        // Follows the camera: position = eye, direction = view forward.
+        std::string base = "uSpots[1]";
+        _bpShader->setUniformVec3(base + ".position", _camera.transform.position);
+        _bpShader->setUniformVec3(base + ".direction", _camera.transform.getFront());
+        _bpShader->setUniformVec3(base + ".color", _flash.color);
+        _bpShader->setUniformFloat(base + ".intensity", _flash.intensity);
+        _bpShader->setUniformFloat(base + ".cosAngle", _flash.cosAngle);
+        _bpShader->setUniformFloat(base + ".kc", 1.0f);   // no falloff: it travels with the player
+        _bpShader->setUniformFloat(base + ".kl", 0.0f);
+        _bpShader->setUniformFloat(base + ".kq", 0.0f);
+        spCount = 2;
     }
     _bpShader->setUniformInt("uSpotCount", spCount);
 }
@@ -297,7 +324,7 @@ void AimTrainer::drawImGui() {
     if (!_showUi) {
         return;
     }
-    ImGui::Begin("AimTrainer (Paused)  [F1 to resume]", &_showUi,
+    ImGui::Begin("AimTrainer (Paused)  [F1 / ESC to resume]", &_showUi,
                  ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings);
 
     // Resume button: closes the panel and unpauses.
@@ -369,6 +396,16 @@ void AimTrainer::drawImGui() {
             }
         }
     }
+    if (ImGui::CollapsingHeader("Flashlight (camera)  [L]", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("on", &_flash.on);
+        ImGui::ColorEdit3("color##flash", &_flash.color[0]);
+        ImGui::SliderFloat("intensity##flash", &_flash.intensity, 0.0f, 20.0f);
+        float halfDeg = glm::degrees(std::acos(_flash.cosAngle));
+        if (ImGui::SliderFloat("cone half-angle##flash", &halfDeg, 5.0f, 70.0f)) {
+            _flash.cosAngle = std::cos(glm::radians(halfDeg));
+        }
+        ImGui::TextDisabled("shines from the eye along the view direction");
+    }
     if (ImGui::CollapsingHeader("Hemisphere Ambient", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::ColorEdit3("sky color", &_skyColor[0]);
         ImGui::ColorEdit3("ground color", &_groundColor[0]);
@@ -411,18 +448,70 @@ void AimTrainer::drawImGui() {
         }
     }
 
-    ImGui::Text("F1 UI | WASD move | Tab camera | LMB fire | RMB scope (sniper)");
+    if (ImGui::CollapsingHeader("Capture / Export", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextDisabled("F2 = screenshot (any time)");
+        if (ImGui::Button("Export scene to .obj")) {
+            exportSceneObj();
+        }
+        if (!_lastExport.empty()) {
+            ImGui::TextWrapped("exported: %s", _lastExport.c_str());
+        }
+        if (!_lastScreenshot.empty()) {
+            ImGui::TextWrapped("screenshot: %s", _lastScreenshot.c_str());
+        }
+    }
+
+    ImGui::Text("F1/ESC pause | WASD move | Tab camera | LMB fire | RMB scope | L flashlight | F2 shot");
     ImGui::End();
 }
 
 void AimTrainer::handleInput() {
     float dt = getDeltaTime();
 
-    // F1 toggles the pause/control panel (consume edge).
-    if (_input.keyboard.keyStates[GLFW_KEY_F1] == GLFW_PRESS) {
+    // F2 screenshot works in every state (intro, paused, playing). The actual
+    // glReadPixels happens at the end of renderFrame, when the back buffer is
+    // complete.
+    if (_input.keyboard.keyStates[GLFW_KEY_F2] == GLFW_PRESS) {
+        _screenshotQueued = true;
+        _input.keyboard.keyStates[GLFW_KEY_F2] = GLFW_RELEASE;
+    }
+
+    // Opening cutscene: advance the OBJ sequence and skip on input / timeout.
+    if (_intro) {
+        glfwSetInputMode(_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        bool skip = _introTime > 5.0f;
+        const int skipKeys[] = {GLFW_KEY_SPACE, GLFW_KEY_ENTER, GLFW_KEY_ESCAPE};
+        for (int k : skipKeys) {
+            if (_input.keyboard.keyStates[k] == GLFW_PRESS) {
+                skip = true;
+                _input.keyboard.keyStates[k] = GLFW_RELEASE;
+            }
+        }
+        if (_input.mouse.press.left) {
+            skip = true;
+        }
+        if (skip) {
+            _intro = false;
+            switchMode(CamMode::FPS);   // lock the cursor for FPS play
+        }
+        _input.forwardState();
+        return;
+    }
+
+    // F1 or ESC toggles the pause/control panel (consume edge). ESC is the
+    // familiar "pause + exit" entry: opening the panel freezes the round timer,
+    // and the panel has Resume / Exit Game buttons.
+    if (_input.keyboard.keyStates[GLFW_KEY_F1] == GLFW_PRESS ||
+        _input.keyboard.keyStates[GLFW_KEY_ESCAPE] == GLFW_PRESS) {
         _showUi = !_showUi;
         _paused = _showUi;
         _input.keyboard.keyStates[GLFW_KEY_F1] = GLFW_RELEASE;
+        _input.keyboard.keyStates[GLFW_KEY_ESCAPE] = GLFW_RELEASE;
+    }
+    // 'L' toggles the camera flashlight (consume edge).
+    if (_input.keyboard.keyStates[GLFW_KEY_L] == GLFW_PRESS) {
+        _flash.on = !_flash.on;
+        _input.keyboard.keyStates[GLFW_KEY_L] = GLFW_RELEASE;
     }
     // If the panel was closed by other means (X button / Resume button), unpause.
     if (!_showUi) {
@@ -666,6 +755,12 @@ void AimTrainer::drawScene(GLSLProgram& shader, bool withMaterial) {
 void AimTrainer::renderFrame() {
     glEnable(GL_DEPTH_TEST);
 
+    if (_intro) {
+        renderIntro();
+        captureScreenshot();
+        return;
+    }
+
     // Keep aspect in sync with the framebuffer size.
     _camera.aspect = static_cast<float>(_windowWidth) / static_cast<float>(_windowHeight);
 
@@ -738,6 +833,8 @@ void AimTrainer::renderFrame() {
     drawRoundOverModal();   // big result modal when a round ends
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    captureScreenshot();   // F2: grab the composited back buffer
 }
 
 // ===================== Gameplay (Task 8) =====================
@@ -1068,5 +1165,206 @@ void AimTrainer::drawRoundOverModal() {
             glfwSetWindowShouldClose(_window, GLFW_TRUE);
         }
         ImGui::EndPopup();
+    }
+}
+
+// ===================== Intro / Capture / Export (Task 9 + 10) =====================
+
+void AimTrainer::renderIntro() {
+    float dt = getDeltaTime();
+    _introTime += dt;
+    _introSeq.update(dt);
+
+    float aspect = static_cast<float>(_windowWidth) / static_cast<float>(_windowHeight);
+
+    // Slow orbiting camera around the deforming sphere.
+    float a = _introTime * 0.5f;
+    glm::vec3 eye(std::sin(a) * 3.6f, 1.7f, std::cos(a) * 3.6f);
+    glm::vec3 center(0.0f, 1.4f, 0.0f);
+    glm::mat4 view = glm::lookAt(eye, center, glm::vec3(0.0f, 1.0f, 0.0f));
+    glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100.0f);
+
+    glClearColor(0.03f, 0.04f, 0.07f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glViewport(0, 0, _windowWidth, _windowHeight);
+
+    _bpShader->use();
+    _bpShader->setUniformMat4("uView", view);
+    _bpShader->setUniformMat4("uProj", proj);
+    _bpShader->setUniformMat4("uLightSpace", glm::mat4(1.0f));
+    _bpShader->setUniformMat4("uSpotSpace", glm::mat4(1.0f));
+    _bpShader->setUniformVec3("uViewPos", eye);
+    setLightUniforms();
+    // No shadow pass runs during the intro; disable sampling.
+    _bpShader->setUniformBool("uShadowsOn", false);
+    _bpShader->setUniformBool("uSpotShadowsOn", false);
+    _bpShader->setUniformInt("uShadowMap", 1);
+    _shadowTex->bind(1);
+    _bpShader->setUniformInt("uSpotShadowMap", 2);
+    _spotShadowTex->bind(2);
+
+    Model* m = _introSeq.currentModel();
+    if (m) {
+        glm::mat4 model = glm::translate(glm::mat4(1.0f), center);
+        model = glm::rotate(model, _introTime * 0.7f, glm::vec3(0.0f, 1.0f, 0.0f));
+        model = glm::scale(model, glm::vec3(1.15f));
+        _bpShader->setUniformMat4("uModel", model);
+        _bpShader->setUniformVec3("uKd", glm::vec3(0.2f, 0.6f, 1.0f));
+        _bpShader->setUniformVec3("uKs", glm::vec3(0.8f));
+        _bpShader->setUniformFloat("uShininess", 64.0f);
+        _bpShader->setUniformBool("uHasTexture", false);
+        m->draw();
+    }
+    _bpShader->unuse();
+
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+    drawIntroOverlay();
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+}
+
+void AimTrainer::drawIntroOverlay() {
+    ImGuiIO& io = ImGui::GetIO();
+    // Fades in then out near the auto-skip.
+    float fade = 1.0f;
+    if (_introTime < 0.4f) {
+        fade = _introTime / 0.4f;
+    } else if (_introTime > 4.4f) {
+        fade = std::max(0.0f, (5.0f - _introTime) / 0.6f);
+    }
+    ImU32 col = IM_COL32((int)(255 * fade), (int)(255 * fade), (int)(255 * fade), 255);
+
+    int flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground;
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.30f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (ImGui::Begin("IntroTitle", nullptr, flags)) {
+        if (_bigFont) {
+            ImGui::PushFont(_bigFont);
+        }
+        const char* title = "AimTrainer";
+        ImVec2 sz = ImGui::CalcTextSize(title);
+        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - sz.x) * 0.5f);
+        ImGui::TextColored(ImVec4(0.4f, 0.8f * fade + 0.2f, 1.0f, 1.0f), "%s", title);
+        if (_bigFont) {
+            ImGui::PopFont();
+        }
+    }
+    ImGui::End();
+
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.82f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (ImGui::Begin("IntroHint", nullptr, flags)) {
+        const char* hint = "press any key to start   ·   F2 screenshot";
+        ImVec2 sz = ImGui::CalcTextSize(hint);
+        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - sz.x) * 0.5f);
+        ImGui::TextColored(ImVec4(0.7f, 0.75f, 0.8f, fade), "%s", hint);
+        ImGui::TextDisabled("OBJ-sequence mesh animation (base req 7)");
+    }
+    ImGui::End();
+    (void)col;
+}
+
+void AimTrainer::captureScreenshot() {
+    if (!_screenshotQueued) {
+        return;
+    }
+    _screenshotQueued = false;
+
+    namespace fs = std::filesystem;
+    std::string dir = getAssetFullPath("screenshots/");
+    fs::create_directories(dir);
+
+    int w = _windowWidth;
+    int h = _windowHeight;
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    std::vector<unsigned char> pixels(static_cast<size_t>(w) * h * 4);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_BACK);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+
+    // Flip vertically: OpenGL is bottom-origin, PNG is top-origin.
+    int rowBytes = w * 4;
+    std::vector<unsigned char> flipped(pixels.size());
+    for (int y = 0; y < h; ++y) {
+        std::memcpy(&flipped[static_cast<size_t>(y) * rowBytes],
+                    &pixels[static_cast<size_t>(h - 1 - y) * rowBytes], rowBytes);
+    }
+
+    // Incrementing filename: first shot_NNN.png that does not yet exist.
+    int n = 0;
+    char buf[64];
+    for (;;) {
+        std::snprintf(buf, sizeof(buf), "shot_%03d.png", n);
+        if (!fs::exists(dir + buf)) {
+            break;
+        }
+        ++n;
+    }
+    std::string path = dir + buf;
+    stbi_write_png(path.c_str(), w, h, 4, flipped.data(), rowBytes);
+    _lastScreenshot = path;
+}
+
+void AimTrainer::exportSceneObj() {
+    namespace fs = std::filesystem;
+    std::string dir = getAssetFullPath("exports/");
+    fs::create_directories(dir);
+    std::string path = dir + "scene.obj";
+
+    // Merge the arena obstacles + platform + ramps + alive targets into a single
+    // world-space mesh, then write it as .obj via the self-written exporter.
+    std::vector<glm::vec3> P, N;
+    std::vector<glm::vec2> T;
+    std::vector<uint32_t> I;
+
+    auto addModel = [&](const Model& mdl, const glm::mat4& modelMat) {
+        const auto& verts = mdl.getVertices();
+        const auto& idx = mdl.getIndices();
+        uint32_t base = static_cast<uint32_t>(P.size());
+        // All transforms here are translate / rotate / uniform-scale, so the
+        // upper-left 3x3 of the model matrix is a valid normal transform after
+        // renormalization (no non-uniform scale to invert).
+        glm::mat3 nm(modelMat);
+        for (const Vertex& v : verts) {
+            P.push_back(glm::vec3(modelMat * glm::vec4(v.position, 1.0f)));
+            N.push_back(glm::normalize(nm * v.normal));
+            T.push_back(v.texCoord);
+        }
+        for (uint32_t id : idx) {
+            I.push_back(base + id);
+        }
+    };
+
+    for (const auto& o : _obstacles) {
+        addModel(*o.model, o.model->transform.getLocalMatrix());
+    }
+    if (_platform) {
+        addModel(*_platform, _platform->transform.getLocalMatrix());
+    }
+    if (_rampLeft) {
+        addModel(*_rampLeft, _rampLeft->transform.getLocalMatrix());
+    }
+    if (_rampRight) {
+        addModel(*_rampRight, _rampRight->transform.getLocalMatrix());
+    }
+    for (const auto& t : _targets) {
+        if (!t.alive) {
+            continue;
+        }
+        glm::mat4 mm = glm::translate(glm::mat4(1.0f), t.position);
+        mm = glm::scale(mm, glm::vec3(t.radius));
+        addModel(*_targetModel, mm);
+    }
+
+    try {
+        saveObj(path, P, N, T, I);
+        _lastExport = path;
+    } catch (const std::exception&) {
+        _lastExport.clear();
     }
 }
