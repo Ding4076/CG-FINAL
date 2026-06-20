@@ -12,6 +12,7 @@
 #include <glm/gtc/random.hpp>
 #include <stb_image_write.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -56,11 +57,15 @@ AimTrainer::AimTrainer(const Options& options)
     _scopeShader->link();
     _fullscreenQuad = std::make_unique<FullscreenQuad>();
 
-    _points.resize(2);
+    _points.resize(3);
     _points[0].position = {-2.0f, 2.0f, 2.0f};
     _points[0].color = {1.0f, 0.7f, 0.5f};
     _points[1].position = {2.0f, 2.0f, 2.0f};
     _points[1].color = {0.5f, 0.7f, 1.0f};
+    // Back room point light (behind the door, warm amber)
+    _points[2].position = {0.0f, 2.5f, -7.5f};
+    _points[2].color    = {1.0f, 0.75f, 0.4f};
+    _points[2].intensity = 2.5f;
     _spots.resize(1);
 
     // The six showcase primitives are off by default (they were just a base-req-1
@@ -86,9 +91,9 @@ AimTrainer::AimTrainer(const Options& options)
     if (_audioOk) {
         std::string sfx = getAssetFullPath("sounds/");
         // Each load fails silently (returns false) if the file is missing.
-        _audio.load("pistol", sfx + "pistol.wav");
-        _audio.load("sniper", sfx + "sniper.wav");
-        _audio.load("pop", sfx + "pop.wav");
+        _audio.load("pistol", sfx + "pistol.mp3");
+        _audio.load("sniper", sfx + "sniper.mp3");
+        _audio.load("pop",    sfx + "pop.wav");
     }
 
 
@@ -97,11 +102,42 @@ AimTrainer::AimTrainer(const Options& options)
     _groundPlane = std::make_unique<Model>(groundMesh.first, groundMesh.second);
     _groundPlane->transform.position = {0.5f, 0.0f, 0.0f};
 
+    // Skybox (6-face cubemap from media/textures/skybox/).
+    try {
+        std::string sb = getAssetFullPath("textures/skybox/");
+        _skybox = std::make_unique<SkyBox>(std::vector<std::string>{
+            sb + "right.jpg", sb + "left.jpg",
+            sb + "top.jpg",   sb + "bottom.jpg",
+            sb + "front.jpg", sb + "back.jpg"
+        });
+    } catch (const std::exception&) {
+        // skybox textures missing -> silently skip
+    }
+
+    // Ground/wall/crate diffuse texture (rock).
+    try {
+        _groundTex = std::make_unique<ImageTexture2D>(getAssetFullPath("textures/rock.jpg"));
+        _groundTex->setParamterInt(GL_TEXTURE_WRAP_S, GL_REPEAT);
+        _groundTex->setParamterInt(GL_TEXTURE_WRAP_T, GL_REPEAT);
+    } catch (const std::exception&) {
+        // texture missing -> fall back to solid colour
+    }
+
+    // Platform/ramp texture (wall bricks).
+    try {
+        _wallTex = std::make_unique<ImageTexture2D>(getAssetFullPath("textures/wall.jpg"));
+        _wallTex->setParamterInt(GL_TEXTURE_WRAP_S, GL_REPEAT);
+        _wallTex->setParamterInt(GL_TEXTURE_WRAP_T, GL_REPEAT);
+    } catch (const std::exception&) {
+        // texture missing -> fall back to solid colour
+    }
+
     initShadowMap();
+    initGun();
 
     // Opening cutscene: a deforming-sphere OBJ sequence (base req 7). The frames
     // are generated on first run if missing, then read back from disk.
-    if (!_introSeq.loadOrGenerate(getAssetFullPath("models/seq/"), 30, 12)) {
+    if (!_introSeq.loadOrGenerate(getAssetFullPath("models/seq/"), 48, 24)) {
         _intro = false;   // generation/load failed -> skip straight to the game
     }
 
@@ -229,8 +265,12 @@ void AimTrainer::initArena() {
 
     // --- Enclosing WALLS (blockers). Inner faces aligned to platform edges so
     // there is no seam to fall through.
-    // Platform back edge is z = -5.0; back-wall front face touches it (center z=-5.3).
-    addBox({0.5f, 2.0f, -5.3f}, {8.2f, 2.0f, 0.3f});    // back wall (flush with platform back)
+    // Back wall split into segments leaving door opening x in [-1,1], y in [1.6,3.8].
+    // Full back wall would be: center {0.5,2,-5.3} half {8.2,2,0.3} -> x in [-7.7, 8.7]
+    // Left segment:  x in [-7.7, -1.0] -> center x=-4.35, half x=3.35
+    addBox({-4.35f, 2.0f, -5.3f}, {3.35f, 2.0f, 0.3f});
+    // Right segment: x in [1.0, 8.7]  -> center x=4.85, half x=3.85
+    addBox({4.85f, 2.0f, -5.3f}, {3.85f, 2.0f, 0.3f});
     addBox({-8.2f, 2.0f, -1.0f}, {0.3f, 2.0f, 5.5f});   // left wall (inner face x=-7.9)
     addBox({8.2f, 2.0f, -1.0f}, {0.3f, 2.0f, 5.5f});    // right wall (inner face x=7.9)
 
@@ -243,13 +283,57 @@ void AimTrainer::initArena() {
     // surfaceY at z=0 (max.y) = yHigh = 0 (low end, toward spawn).
     _ground.push_back({{rampLXMin, -3.0f}, {rampLXMax, 0.0f}, _platformHeight, 0.0f});
     _ground.push_back({{rampRXMin, -3.0f}, {rampRXMax, 0.0f}, _platformHeight, 0.0f});
+
+    // --- DOOR: back-wall centre opening already created above as three wall segments.
+    // Door panel: hinge at x=-1, swings to +x (opens into the platform area).
+    {
+        Mesh m = createBox(_door.w, _door.h, _door.d);
+        _door.model = std::make_unique<Model>(m.first, m.second);
+    }
+
+    // --- BACK RAMP: behind the door so the player can return from the back area.
+    // Ramp spans x in [-1,1], z in [-5.0,-8.6], rises from y=0 (far end) to y=1.6 (door exit).
+    {
+        float backRun   = 3.6f;   // z range: -8.6 to -5.0
+        float backRise  = _platformHeight;
+        float backLen   = std::sqrt(backRun * backRun + backRise * backRise);
+        float backAngle = std::atan2(backRise, backRun);
+        Mesh m = createBox(2.0f, 0.1f, backLen);
+        _rampBack = std::make_unique<Model>(m.first, m.second);
+        // Center z = -6.8 (midpoint of [-5.0,-8.6]), center y = 0.8
+        _rampBack->transform.position = {0.0f, backRise * 0.5f, -6.8f};
+        // -Z end up (high, at door), +Z end down (low, away)
+        _rampBack->transform.rotation = glm::angleAxis(-backAngle, glm::vec3(1.0f, 0.0f, 0.0f));
+    }
+    // Ground patch for back ramp + landing: z in [-8.6,-5.0].
+    // At z=-5.0 (door exit, max.y) -> yHigh = platformHeight (1.6, matches platform level).
+    // At z=-8.6 (far end, min.y)   -> yLow  = 0 (ground level).
+    _ground.push_back({{-1.0f, -8.6f}, {1.0f, -5.0f}, 0.0f, _platformHeight});
+
+    // --- BACK ROOM CRATES: two stacked boxes behind the door for cover/exploration.
+    addBox({-3.0f, 0.6f, -7.0f}, {0.6f, 0.6f, 0.6f});   // left crate
+    addBox({ 3.0f, 0.6f, -7.0f}, {0.6f, 0.6f, 0.6f});   // right crate
+    addBox({ 3.0f, 1.8f, -7.0f}, {0.6f, 0.6f, 0.6f});   // stacked on right
 }
 
 std::vector<AABB> AimTrainer::obstacleBoxes() const {
     std::vector<AABB> boxes;
-    boxes.reserve(_obstacles.size());
+    boxes.reserve(_obstacles.size() + 1);
     for (const auto& o : _obstacles) {
         boxes.push_back(o.box);
+    }
+    // Door collision: approximate the rotated door panel as an AABB.
+    // When fully open (angle >= 85 deg) the door is flush with the wall — skip it.
+    if (_door.angle < glm::radians(85.0f)) {
+        // Panel center in world space (hinge + half-width rotated by angle).
+        float cx = _door.hingePos.x + _door.w * 0.5f * std::cos(-_door.angle);
+        float cz = _door.hingePos.z + _door.w * 0.5f * std::sin(-_door.angle);
+        float panelHalfX = _door.w * 0.5f * std::abs(std::cos(_door.angle)) + _door.d * 0.5f;
+        float panelHalfZ = _door.w * 0.5f * std::abs(std::sin(_door.angle)) + _door.d * 0.5f;
+        AABB doorBox;
+        doorBox.min = {cx - panelHalfX, _door.hingePos.y - _door.h * 0.5f, cz - panelHalfZ};
+        doorBox.max = {cx + panelHalfX, _door.hingePos.y + _door.h * 0.5f, cz + panelHalfZ};
+        boxes.push_back(doorBox);
     }
     return boxes;
 }
@@ -448,6 +532,14 @@ void AimTrainer::drawImGui() {
         }
     }
 
+    if (ImGui::CollapsingHeader("Door", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("Status: %s", _door.open ? "Open" : "Closed");
+        ImGui::TextDisabled("Shoot the door in the back wall to open it.");
+        if (ImGui::Button(_door.open ? "Close door" : "Open door")) {
+            _door.open = !_door.open;
+        }
+    }
+
     if (ImGui::CollapsingHeader("Capture / Export", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::TextDisabled("F2 = screenshot (any time)");
         if (ImGui::Button("Export scene to .obj")) {
@@ -479,6 +571,47 @@ void AimTrainer::handleInput() {
     // Opening cutscene: advance the OBJ sequence and skip on input / timeout.
     if (_intro) {
         glfwSetInputMode(_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+
+        // If the ball was already hit, wait for the delay then enter game.
+        if (_introHit) {
+            _introHitTimer -= getDeltaTime();
+            if (_introHitTimer <= 0.0f) {
+                _intro = false;
+                switchMode(CamMode::FPS);
+            }
+            _input.forwardState();
+            return;
+        }
+
+        // Left-click: test ray against the intro ball (center at world origin +
+        // height 1.4, radius ~1.15 to match the scaled draw call).
+        if (_input.mouse.press.left) {
+            // Build a ray from the camera eye through the screen center.
+            // The intro camera always looks at (0, 1.4, 0) from _introEye.
+            glm::vec3 origin = _introEye;
+            glm::vec3 target = glm::vec3(0.0f, 1.4f, 0.0f);
+            glm::vec3 dir = glm::normalize(target - origin);
+
+            // Ray-sphere intersection (sphere center = target, radius = 1.15).
+            glm::vec3 oc = origin - target;
+            float radius = 1.15f;
+            float b = glm::dot(oc, dir);
+            float c = glm::dot(oc, oc) - radius * radius;
+            float disc = b * b - c;
+            if (disc >= 0.0f) {
+                // Hit! Trigger burst and start the exit countdown.
+                _introHit = true;
+                _introHitTimer = kIntroHitDelay;
+                _particles.burst(target, glm::vec3(0.4f, 0.8f, 1.0f), 80, 8.0f, 1.5f, 16.0f);
+                _particles.burst(target, glm::vec3(1.0f, 1.0f, 0.9f), 40, 14.0f, 0.5f, 10.0f);
+                _particles.burst(target, glm::vec3(0.2f, 0.5f, 0.9f), 20, 2.5f, 2.5f, 22.0f);
+                if (_audioOk) _audio.play("pop");
+                _input.forwardState();
+                return;
+            }
+        }
+
+        // Any other key / auto-skip after 5 s.
         bool skip = _introTime > 5.0f;
         const int skipKeys[] = {GLFW_KEY_SPACE, GLFW_KEY_ENTER, GLFW_KEY_ESCAPE};
         for (int k : skipKeys) {
@@ -487,12 +620,9 @@ void AimTrainer::handleInput() {
                 _input.keyboard.keyStates[k] = GLFW_RELEASE;
             }
         }
-        if (_input.mouse.press.left) {
-            skip = true;
-        }
         if (skip) {
             _intro = false;
-            switchMode(CamMode::FPS);   // lock the cursor for FPS play
+            switchMode(CamMode::FPS);
         }
         _input.forwardState();
         return;
@@ -706,8 +836,16 @@ void AimTrainer::drawScene(GLSLProgram& shader, bool withMaterial) {
     if (withMaterial) {
         drawTargets(shader);
     } else {
-        // depth pass: draw targets without setting material uniforms
-        drawTargets(shader);
+        // depth pass: only set geometry, no material uniforms (depth shader has none)
+        if (_targetModel) {
+            for (const auto& t : _targets) {
+                if (!t.alive) continue;
+                glm::mat4 model = glm::translate(glm::mat4(1.0f), t.position);
+                model = glm::scale(model, glm::vec3(t.radius));
+                shader.setUniformMat4("uModel", model);
+                _targetModel->draw();
+            }
+        }
     }
     // Rear platform + ramps (walkable via the ground-height system).
     auto drawGroundModel = [&](Model* mdl, glm::vec3 kd) {
@@ -717,9 +855,15 @@ void AimTrainer::drawScene(GLSLProgram& shader, bool withMaterial) {
         shader.setUniformMat4("uModel", mdl->transform.getLocalMatrix());
         if (withMaterial) {
             shader.setUniformVec3("uKd", kd);
-            shader.setUniformVec3("uKs", glm::vec3(0.1f));
-            shader.setUniformFloat("uShininess", 16.0f);
-            shader.setUniformBool("uHasTexture", false);
+            shader.setUniformVec3("uKs", glm::vec3(0.15f));
+            shader.setUniformFloat("uShininess", 24.0f);
+            if (_wallTex) {
+                _wallTex->bind(0);
+                shader.setUniformInt("uTexture", 0);
+                shader.setUniformBool("uHasTexture", true);
+            } else {
+                shader.setUniformBool("uHasTexture", false);
+            }
         }
         mdl->draw();
     };
@@ -734,7 +878,13 @@ void AimTrainer::drawScene(GLSLProgram& shader, bool withMaterial) {
             shader.setUniformVec3("uKd", glm::vec3(0.5f, 0.45f, 0.4f));
             shader.setUniformVec3("uKs", glm::vec3(0.1f));
             shader.setUniformFloat("uShininess", 16.0f);
-            shader.setUniformBool("uHasTexture", false);
+            if (_groundTex) {
+                _groundTex->bind(0);
+                shader.setUniformInt("uTexture", 0);
+                shader.setUniformBool("uHasTexture", true);
+            } else {
+                shader.setUniformBool("uHasTexture", false);
+            }
         }
         o.model->draw();
     }
@@ -746,9 +896,49 @@ void AimTrainer::drawScene(GLSLProgram& shader, bool withMaterial) {
             shader.setUniformVec3("uKd", glm::vec3(0.35f, 0.35f, 0.38f));
             shader.setUniformVec3("uKs", glm::vec3(0.0f));
             shader.setUniformFloat("uShininess", 8.0f);
-            shader.setUniformBool("uHasTexture", false);
+            if (_groundTex) {
+                _groundTex->bind(0);
+                shader.setUniformInt("uTexture", 0);
+                shader.setUniformBool("uHasTexture", true);
+            } else {
+                shader.setUniformBool("uHasTexture", false);
+            }
         }
         _groundPlane->draw();
+    }
+
+    // Door panel: hinge at hingePos.x, swings on Y axis.
+    if (_door.model) {
+        // Translate hinge to origin, rotate, translate panel half-width, then to world.
+        glm::mat4 m = glm::mat4(1.0f);
+        m = glm::translate(m, _door.hingePos);
+        m = glm::rotate(m, -_door.angle, glm::vec3(0.0f, 1.0f, 0.0f));
+        m = glm::translate(m, glm::vec3(_door.w * 0.5f, 0.0f, 0.0f));
+        shader.setUniformMat4("uModel", m);
+        if (withMaterial) {
+            shader.setUniformVec3("uKd", glm::vec3(0.35f, 0.18f, 0.08f));  // dark wood brown
+            shader.setUniformVec3("uKs", glm::vec3(0.4f, 0.3f, 0.2f));
+            shader.setUniformFloat("uShininess", 48.0f);
+            shader.setUniformBool("uHasTexture", false);
+        }
+        _door.model->draw();
+    }
+
+    // Back ramp (behind door, return path).
+    drawGroundModel(_rampBack.get(), glm::vec3(0.5f, 0.42f, 0.35f));
+
+    // Bonus target in back room: large gold sphere.
+    if (_bonus.alive && _targetModel) {
+        glm::mat4 m = glm::translate(glm::mat4(1.0f), _bonus.position);
+        m = glm::scale(m, glm::vec3(_bonus.radius));
+        shader.setUniformMat4("uModel", m);
+        if (withMaterial) {
+            shader.setUniformVec3("uKd", glm::vec3(1.0f, 0.78f, 0.1f));
+            shader.setUniformVec3("uKs", glm::vec3(1.0f, 0.9f, 0.5f));
+            shader.setUniformFloat("uShininess", 128.0f);
+            shader.setUniformBool("uHasTexture", false);
+        }
+        _targetModel->draw();
     }
 }
 
@@ -807,8 +997,16 @@ void AimTrainer::renderFrame() {
     drawScene(*_bpShader, true);
     _bpShader->unuse();
 
+    // Skybox (drawn last with depth trick so it fills the background).
+    if (_skybox) {
+        _skybox->draw(proj, view);
+    }
+
     // Particles (additive points) on top of the scene.
     drawParticles();
+
+    // Viewmodel gun (drawn with a fresh depth buffer so it's always on top).
+    drawGun();
 
     // Sniper scope mask: black everywhere outside the scope circle (zoom is done
     // above by narrowing fovy). The crosshair/ring are drawn by ImGui (HUD).
@@ -889,10 +1087,9 @@ void AimTrainer::resetRound() {
 }
 
 void AimTrainer::spawnTarget(Target& t) {
-    // Random position in the target range (beyond the railing), kept in view.
     float x = glm::linearRand(-4.0f, 4.0f);
-    float y = glm::linearRand(1.0f, 3.0f);
-    float z = glm::linearRand(5.0f, 6.5f);
+    float y = glm::linearRand(0.8f, 3.5f);
+    float z = glm::linearRand(4.5f, 8.0f);
     t.position = glm::vec3(x, y, z);
     t.alive = true;
 }
@@ -936,6 +1133,48 @@ void AimTrainer::updateWeapon(float dt) {
     if (_fireCooldown > 0.0f) {
         _fireCooldown -= dt;
     }
+    if (_hitFlashTimer > 0.0f) {
+        _hitFlashTimer -= dt;
+        if (_hitFlashTimer <= 0.0f) {
+            _hitFlashTarget = -1;
+        }
+    }
+    if (_hitMarkerTimer > 0.0f) {
+        _hitMarkerTimer -= dt;
+    }
+    // Crosshair springs back
+    _crosshairExpand = std::max(0.0f, _crosshairExpand - dt * 80.0f);
+    // Floating texts
+    for (auto& ft : _floatingTexts) ft.timer -= dt;
+    _floatingTexts.erase(
+        std::remove_if(_floatingTexts.begin(), _floatingTexts.end(),
+                       [](const FloatingText& f){ return f.timer <= 0.0f; }),
+        _floatingTexts.end());
+    // Spring recoil: F = -k*x - damping*v
+    float force = -kRecoilSpring * _recoilAngle - kRecoilDamping * _recoilVel;
+    _recoilVel   += force * dt;
+    _recoilAngle += _recoilVel * dt;
+    if (std::abs(_recoilAngle) < 0.0001f && std::abs(_recoilVel) < 0.0001f) {
+        _recoilAngle = 0.0f;
+        _recoilVel   = 0.0f;
+    }
+
+    // Door swing: spring-damper to target angle (open=90deg, closed=0).
+    {
+        float target = _door.open ? glm::radians(90.0f) : 0.0f;
+        float df = 12.0f * (target - _door.angle) - 5.0f * _door.angVel;
+        _door.angVel  += df * dt;
+        _door.angle   += _door.angVel * dt;
+        _door.angle    = glm::clamp(_door.angle, 0.0f, glm::radians(92.0f));
+    }
+
+    // Bonus target respawn.
+    if (!_bonus.alive) {
+        _bonus.respawnTimer -= dt;
+        if (_bonus.respawnTimer <= 0.0f) {
+            _bonus.alive = true;
+        }
+    }
 }
 
 void AimTrainer::tryFire() {
@@ -953,6 +1192,9 @@ void AimTrainer::tryFire() {
     }
 
     _game.registerShot();
+    // Recoil kick + crosshair expand
+    _recoilVel -= kRecoilKick;
+    _crosshairExpand = 18.0f;
     glm::vec3 origin = _camera.transform.position;
     glm::vec3 dir = glm::normalize(aimRayDir());
 
@@ -983,10 +1225,68 @@ void AimTrainer::tryFire() {
         _audio.play(_weapon == Weapon::Sniper ? "sniper" : "pistol");
     }
 
+    // Door hit: transform ray into door local space, then test fixed local AABB.
+    // Draw code applies R(-angle, Y) then T(hingePos), so inverse is T(-hingePos) then R(+angle, Y).
+    // R(+angle, Y): x' = x*cos(a)+z*sin(a),  z' = -x*sin(a)+z*cos(a)
+    {
+        float ca = std::cos(_door.angle), sa = std::sin(_door.angle);
+        glm::vec3 ro = origin - _door.hingePos;
+        glm::vec3 localOrigin = {  ro.x*ca + ro.z*sa,  ro.y, -ro.x*sa + ro.z*ca };
+        glm::vec3 localDir    = { dir.x*ca + dir.z*sa, dir.y, -dir.x*sa + dir.z*ca };
+        // Local AABB: panel spans x in [0,w], y in [-h/2,h/2], z in [-d/2,d/2]
+        glm::vec3 lmin = {0.0f,         -_door.h * 0.5f, -_door.d * 0.5f};
+        glm::vec3 lmax = {_door.w,       _door.h * 0.5f,  _door.d * 0.5f};
+        glm::vec3 invD = 1.0f / (localDir + glm::vec3(1e-7f));
+        glm::vec3 t0 = (lmin - localOrigin) * invD;
+        glm::vec3 t1 = (lmax - localOrigin) * invD;
+        glm::vec3 tMin = glm::min(t0, t1), tMax = glm::max(t0, t1);
+        float tEnter = glm::max(glm::max(tMin.x, tMin.y), tMin.z);
+        float tExit  = glm::min(glm::min(tMax.x, tMax.y), tMax.z);
+        if (tExit > 0.0f && tEnter < tExit && tEnter < 25.0f) {
+            _door.open   = !_door.open;
+            _door.angVel = _door.open ? 3.5f : -3.5f;
+        }
+    }
+
+    // Bonus target in back room.
+    if (_bonus.alive) {
+        glm::vec3 oc = origin - _bonus.position;
+        float b2 = glm::dot(oc, dir);
+        float c2 = glm::dot(oc, oc) - _bonus.radius * _bonus.radius;
+        float disc2 = b2 * b2 - c2;
+        if (disc2 >= 0.0f && (-b2 - std::sqrt(disc2)) > 0.0f) {
+            _bonus.alive = false;
+            _bonus.respawnTimer = BonusTarget::kRespawnDelay;
+            ++_bonus.bonusHits;
+            // +3 bonus hits: add directly to hits counter (no extra shots registered)
+            _game.hits += 3;
+            _hitMarkerTimer = kHitMarkerDuration;
+            // Giant golden explosion
+            _particles.burst(_bonus.position, glm::vec3(1.0f, 0.85f, 0.1f), 120, 12.0f, 2.0f, 20.0f);
+            _particles.burst(_bonus.position, glm::vec3(1.0f, 0.5f, 0.05f),  60, 18.0f, 0.8f, 14.0f);
+            _particles.burst(_bonus.position, glm::vec3(1.0f, 1.0f, 0.6f),   40, 22.0f, 0.3f,  8.0f);
+            if (_audioOk) _audio.play("pop");
+            // Three "+1" floaters at slightly different offsets
+            for (int i = 0; i < 3; ++i) {
+                glm::vec3 off = _bonus.position + glm::vec3((i-1)*0.5f, 0.0f, 0.0f);
+                _floatingTexts.push_back({off, FloatingText::kTotal});
+            }
+        }
+    }
+
     if (best >= 0) {
         _game.registerHit();
+        _hitFlashTarget = best;
+        _hitFlashTimer  = kHitFlashDuration;
+        _hitMarkerTimer = kHitMarkerDuration;
+        _floatingTexts.push_back({_targets[best].position, FloatingText::kTotal});
         _targets[best].alive = false;
-        _particles.burst(_targets[best].position, _targets[best].color, 30, 4.0f, 0.6f, 10.0f);
+        // Main burst: hot orange-red, large and fast.
+        _particles.burst(_targets[best].position, glm::vec3(1.0f, 0.35f, 0.05f), 80, 9.0f, 1.4f, 16.0f);
+        // Core flash: bright yellow-white sparks.
+        _particles.burst(_targets[best].position, glm::vec3(1.0f, 0.95f, 0.4f),  40, 15.0f, 0.35f, 10.0f);
+        // Ember drift: slow deep-red embers that linger.
+        _particles.burst(_targets[best].position, glm::vec3(0.9f, 0.2f, 0.05f),  20, 2.5f,  2.2f,  22.0f);
         if (_audioOk) {
             _audio.play("pop");
         }
@@ -1004,16 +1304,25 @@ void AimTrainer::drawTargets(GLSLProgram& shader) {
     if (!_targetModel) {
         return;
     }
-    for (const auto& t : _targets) {
+    for (int i = 0; i < (int)_targets.size(); ++i) {
+        const auto& t = _targets[i];
         if (!t.alive) {
             continue;
         }
         glm::mat4 model = glm::translate(glm::mat4(1.0f), t.position);
-        model = glm::scale(model, glm::vec3(t.radius));   // unit sphere -> radius
+        model = glm::scale(model, glm::vec3(t.radius));
         shader.setUniformMat4("uModel", model);
-        shader.setUniformVec3("uKd", t.color);
-        shader.setUniformVec3("uKs", glm::vec3(0.6f));
-        shader.setUniformFloat("uShininess", 48.0f);
+
+        // Hit flash: briefly show white specular when this target was just hit.
+        bool flashing = (i == _hitFlashTarget && _hitFlashTimer > 0.0f);
+        float flashT = flashing ? (_hitFlashTimer / kHitFlashDuration) : 0.0f;
+        glm::vec3 kd = flashing ? glm::mix(t.color, glm::vec3(1.0f), flashT * 0.6f) : t.color;
+        glm::vec3 ks = flashing ? glm::mix(glm::vec3(0.6f), glm::vec3(1.0f), flashT) : glm::vec3(0.6f);
+        float shin = flashing ? 128.0f : 48.0f;
+
+        shader.setUniformVec3("uKd", kd);
+        shader.setUniformVec3("uKs", ks);
+        shader.setUniformFloat("uShininess", shin);
         shader.setUniformBool("uHasTexture", false);
         _targetModel->draw();
     }
@@ -1027,28 +1336,39 @@ void AimTrainer::drawParticles() {
 void AimTrainer::drawGameHud() {
     ImGuiIO& io = ImGui::GetIO();
 
-    // ---- Top-center countdown timer (0.01s precision) ----
-    if (_game.timeLimit > 0.0f && !_showRoundOver) {
-        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, 12.0f),
-                                ImGuiCond_Always, ImVec2(0.5f, 0.0f));
-        ImGui::SetNextWindowBgAlpha(0.55f);
-        int flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize |
-                    ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar |
-                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar;
-        if (ImGui::Begin("TimerHud", nullptr, flags)) {
-            if (_bigFont) {
-                ImGui::PushFont(_bigFont);
-            }
-            // Color: white normally, yellow under 10s, red under 3s.
-            ImVec4 tcol(1.0f, 1.0f, 1.0f, 1.0f);
-            if (_game.timeLeft <= 3.0f) {
-                tcol = ImVec4(1.0f, 0.25f, 0.25f, 1.0f);
-            } else if (_game.timeLeft <= 10.0f) {
-                tcol = ImVec4(1.0f, 0.85f, 0.2f, 1.0f);
-            }
-            ImGui::TextColored(tcol, "%.2f", _game.timeLeft);
-            if (_bigFont) {
-                ImGui::PopFont();
+    // ---- Right-side score panel (shots / hits / accuracy / timer) ----
+    if (!_showRoundOver) {
+        const float panelW = 200.0f;
+        ImGui::SetNextWindowSize(ImVec2(panelW, 0.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowPos(
+            ImVec2(io.DisplaySize.x - panelW - 12.0f, io.DisplaySize.y * 0.5f),
+            ImGuiCond_Always, ImVec2(0.0f, 0.5f));
+        ImGui::SetNextWindowBgAlpha(0.60f);
+        int pflags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar;
+        if (ImGui::Begin("ScoreHud", nullptr, pflags)) {
+            ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "[ SCORE ]");
+            ImGui::Separator();
+            ImGui::Text("Shots  : %d", _game.shots);
+            ImGui::Text("Hits   : %d", _game.hits);
+            float acc = _game.accuracy() * 100.0f;
+            ImGui::Text("Acc    : %.1f%%", acc);
+            ImGui::Separator();
+            if (_game.timeLimit > 0.0f) {
+                // Time color: white -> yellow -> red as it runs out.
+                ImVec4 tcol(1.0f, 1.0f, 1.0f, 1.0f);
+                if (_game.timeLeft <= 3.0f)
+                    tcol = ImVec4(1.0f, 0.25f, 0.25f, 1.0f);
+                else if (_game.timeLeft <= 10.0f)
+                    tcol = ImVec4(1.0f, 0.85f, 0.2f, 1.0f);
+                ImGui::Text("Time   :");
+                ImGui::SameLine();
+                if (_bigFont) ImGui::PushFont(_bigFont);
+                ImGui::TextColored(tcol, "%.2f", _game.timeLeft);
+                if (_bigFont) ImGui::PopFont();
+            } else {
+                ImGui::TextDisabled("No time limit");
             }
         }
         ImGui::End();
@@ -1059,27 +1379,52 @@ void AimTrainer::drawGameHud() {
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     ImU32 col = IM_COL32(255, 255, 255, 220);
     if (_weapon == Weapon::Sniper && _scoped) {
-        // Scope vignette: mask everything outside the scope circle. ImGui is not
-        // destination-out, so we can't "punch a hole". Instead cover the four
-        // rectangular regions around the circle (top/bottom/left/right bands),
-        // approximating the circle closely.
         float r = std::min(io.DisplaySize.x, io.DisplaySize.y) * 0.36f;
         ImU32 black = IM_COL32(0, 0, 0, 255);
-        dl->AddRectFilled(ImVec2(0, 0), ImVec2(io.DisplaySize.x, ctr.y - r), black);            // top band
-        dl->AddRectFilled(ImVec2(0, ctr.y + r), ImVec2(io.DisplaySize.x, io.DisplaySize.y), black); // bottom
-        dl->AddRectFilled(ImVec2(0, ctr.y - r), ImVec2(ctr.x - r, ctr.y + r), black);           // left
-        dl->AddRectFilled(ImVec2(ctr.x + r, ctr.y - r), ImVec2(io.DisplaySize.x, ctr.y + r), black); // right
-        // Scope ring + crosshair.
+        dl->AddRectFilled(ImVec2(0, 0), ImVec2(io.DisplaySize.x, ctr.y - r), black);
+        dl->AddRectFilled(ImVec2(0, ctr.y + r), ImVec2(io.DisplaySize.x, io.DisplaySize.y), black);
+        dl->AddRectFilled(ImVec2(0, ctr.y - r), ImVec2(ctr.x - r, ctr.y + r), black);
+        dl->AddRectFilled(ImVec2(ctr.x + r, ctr.y - r), ImVec2(io.DisplaySize.x, ctr.y + r), black);
         dl->AddCircle(ctr, r, IM_COL32(255, 255, 255, 255), 64, 4.0f);
         dl->AddLine(ImVec2(ctr.x - r, ctr.y), ImVec2(ctr.x + r, ctr.y), col, 1.0f);
         dl->AddLine(ImVec2(ctr.x, ctr.y - r), ImVec2(ctr.x, ctr.y + r), col, 1.0f);
     } else if (_weapon == Weapon::Pistol) {
-        // Small crosshair only for the pistol; the sniper has no crosshair when
-        // not scoped (you aim down the scope).
-        dl->AddLine(ImVec2(ctr.x - 10, ctr.y), ImVec2(ctr.x - 3, ctr.y), col, 2.0f);
-        dl->AddLine(ImVec2(ctr.x + 3, ctr.y), ImVec2(ctr.x + 10, ctr.y), col, 2.0f);
-        dl->AddLine(ImVec2(ctr.x, ctr.y - 10), ImVec2(ctr.x, ctr.y - 3), col, 2.0f);
-        dl->AddLine(ImVec2(ctr.x, ctr.y + 3), ImVec2(ctr.x, ctr.y + 10), col, 2.0f);
+        // Dynamic gap: base 3px + expand
+        float gap = 3.0f + _crosshairExpand;
+        float len = 10.0f;
+        dl->AddLine(ImVec2(ctr.x - gap - len, ctr.y), ImVec2(ctr.x - gap, ctr.y), col, 2.0f);
+        dl->AddLine(ImVec2(ctr.x + gap, ctr.y), ImVec2(ctr.x + gap + len, ctr.y), col, 2.0f);
+        dl->AddLine(ImVec2(ctr.x, ctr.y - gap - len), ImVec2(ctr.x, ctr.y - gap), col, 2.0f);
+        dl->AddLine(ImVec2(ctr.x, ctr.y + gap), ImVec2(ctr.x, ctr.y + gap + len), col, 2.0f);
+    }
+
+    // Hit marker: bright orange "×" near crosshair, fades out.
+    if (_hitMarkerTimer > 0.0f) {
+        float t = _hitMarkerTimer / kHitMarkerDuration;
+        ImU32 hcol = IM_COL32(255, 160, 30, (int)(255 * t));
+        float s = 10.0f;
+        dl->AddLine(ImVec2(ctr.x - s, ctr.y - s), ImVec2(ctr.x + s, ctr.y + s), hcol, 2.5f);
+        dl->AddLine(ImVec2(ctr.x + s, ctr.y - s), ImVec2(ctr.x - s, ctr.y + s), hcol, 2.5f);
+    }
+
+    // Floating "+1" texts: world-to-screen, floats up from hit position.
+    if (!_floatingTexts.empty()) {
+        glm::mat4 vp = _camera.getProjectionMatrix() * _camera.getViewMatrix();
+        for (const auto& ft : _floatingTexts) {
+            float progress = 1.0f - ft.timer / FloatingText::kTotal;
+            // Rise the world position upward over time
+            glm::vec3 pos = ft.worldPos + glm::vec3(0.0f, 0.6f + progress * 1.2f, 0.0f);
+            glm::vec4 clip = vp * glm::vec4(pos, 1.0f);
+            if (clip.w <= 0.0f) continue;
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            if (ndc.x < -1.1f || ndc.x > 1.1f || ndc.y < -1.1f || ndc.y > 1.1f) continue;
+            float sx = (ndc.x * 0.5f + 0.5f) * io.DisplaySize.x;
+            float sy = (1.0f - (ndc.y * 0.5f + 0.5f)) * io.DisplaySize.y;
+            float alpha = (ft.timer / FloatingText::kTotal < 0.3f)
+                          ? ft.timer / (FloatingText::kTotal * 0.3f) : 1.0f;
+            ImU32 tcol = IM_COL32(255, 230, 60, (int)(255 * alpha));
+            dl->AddText(ImVec2(sx - 8.0f, sy), tcol, "+1");
+        }
     }
 }
 
@@ -1179,43 +1524,56 @@ void AimTrainer::renderIntro() {
 
     // Slow orbiting camera around the deforming sphere.
     float a = _introTime * 0.5f;
-    glm::vec3 eye(std::sin(a) * 3.6f, 1.7f, std::cos(a) * 3.6f);
+    _introEye = glm::vec3(std::sin(a) * 3.6f, 1.7f, std::cos(a) * 3.6f);
     glm::vec3 center(0.0f, 1.4f, 0.0f);
-    glm::mat4 view = glm::lookAt(eye, center, glm::vec3(0.0f, 1.0f, 0.0f));
+    glm::mat4 view = glm::lookAt(_introEye, center, glm::vec3(0.0f, 1.0f, 0.0f));
     glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 100.0f);
 
     glClearColor(0.03f, 0.04f, 0.07f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glViewport(0, 0, _windowWidth, _windowHeight);
 
-    _bpShader->use();
-    _bpShader->setUniformMat4("uView", view);
-    _bpShader->setUniformMat4("uProj", proj);
-    _bpShader->setUniformMat4("uLightSpace", glm::mat4(1.0f));
-    _bpShader->setUniformMat4("uSpotSpace", glm::mat4(1.0f));
-    _bpShader->setUniformVec3("uViewPos", eye);
-    setLightUniforms();
-    // No shadow pass runs during the intro; disable sampling.
-    _bpShader->setUniformBool("uShadowsOn", false);
-    _bpShader->setUniformBool("uSpotShadowsOn", false);
-    _bpShader->setUniformInt("uShadowMap", 1);
-    _shadowTex->bind(1);
-    _bpShader->setUniformInt("uSpotShadowMap", 2);
-    _spotShadowTex->bind(2);
+    // Draw the deforming sphere only if it hasn't been shot yet.
+    if (!_introHit) {
+        _bpShader->use();
+        _bpShader->setUniformMat4("uView", view);
+        _bpShader->setUniformMat4("uProj", proj);
+        _bpShader->setUniformMat4("uLightSpace", glm::mat4(1.0f));
+        _bpShader->setUniformMat4("uSpotSpace", glm::mat4(1.0f));
+        _bpShader->setUniformVec3("uViewPos", _introEye);
+        setLightUniforms();
+        _bpShader->setUniformBool("uShadowsOn", false);
+        _bpShader->setUniformBool("uSpotShadowsOn", false);
+        _bpShader->setUniformInt("uShadowMap", 1);
+        _shadowTex->bind(1);
+        _bpShader->setUniformInt("uSpotShadowMap", 2);
+        _spotShadowTex->bind(2);
 
-    Model* m = _introSeq.currentModel();
-    if (m) {
-        glm::mat4 model = glm::translate(glm::mat4(1.0f), center);
-        model = glm::rotate(model, _introTime * 0.7f, glm::vec3(0.0f, 1.0f, 0.0f));
-        model = glm::scale(model, glm::vec3(1.15f));
-        _bpShader->setUniformMat4("uModel", model);
-        _bpShader->setUniformVec3("uKd", glm::vec3(0.2f, 0.6f, 1.0f));
-        _bpShader->setUniformVec3("uKs", glm::vec3(0.8f));
-        _bpShader->setUniformFloat("uShininess", 64.0f);
-        _bpShader->setUniformBool("uHasTexture", false);
-        m->draw();
+        Model* m = _introSeq.currentModel();
+        if (m) {
+            glm::mat4 model = glm::translate(glm::mat4(1.0f), center);
+            model = glm::rotate(model, _introTime * 0.7f, glm::vec3(0.0f, 1.0f, 0.0f));
+            model = glm::scale(model, glm::vec3(1.15f));
+            _bpShader->setUniformMat4("uModel", model);
+            // Color cycles blue -> cyan -> purple over time.
+            float ct = _introTime * 0.5f;
+            glm::vec3 kd(
+                0.2f + 0.3f * (0.5f + 0.5f * std::sin(ct + 2.0f)),
+                0.5f + 0.3f * (0.5f + 0.5f * std::sin(ct)),
+                0.9f + 0.1f * (0.5f + 0.5f * std::sin(ct + 1.0f))
+            );
+            _bpShader->setUniformVec3("uKd", kd);
+            _bpShader->setUniformVec3("uKs", glm::vec3(0.9f));
+            _bpShader->setUniformFloat("uShininess", 80.0f);
+            _bpShader->setUniformBool("uHasTexture", false);
+            m->draw();
+        }
+        _bpShader->unuse();
     }
-    _bpShader->unuse();
+
+    // Always draw particles (the explosion after the hit).
+    _particles.update(dt);
+    drawParticles();
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
@@ -1227,44 +1585,62 @@ void AimTrainer::renderIntro() {
 
 void AimTrainer::drawIntroOverlay() {
     ImGuiIO& io = ImGui::GetIO();
-    // Fades in then out near the auto-skip.
     float fade = 1.0f;
-    if (_introTime < 0.4f) {
+    if (_introTime < 0.4f)
         fade = _introTime / 0.4f;
-    } else if (_introTime > 4.4f) {
+    else if (_introTime > 4.4f && !_introHit)
         fade = std::max(0.0f, (5.0f - _introTime) / 0.6f);
-    }
-    ImU32 col = IM_COL32((int)(255 * fade), (int)(255 * fade), (int)(255 * fade), 255);
 
     int flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground;
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.30f),
-                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground |
+                ImGuiWindowFlags_AlwaysAutoResize;
+
+    // ---- Game name: SNAPFIRE (top-left quadrant, well within view) ----
+    ImGui::SetNextWindowPos(
+        ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.18f),
+        ImGuiCond_Always, ImVec2(0.5f, 0.0f));
     if (ImGui::Begin("IntroTitle", nullptr, flags)) {
-        if (_bigFont) {
-            ImGui::PushFont(_bigFont);
-        }
-        const char* title = "AimTrainer";
-        ImVec2 sz = ImGui::CalcTextSize(title);
-        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - sz.x) * 0.5f);
-        ImGui::TextColored(ImVec4(0.4f, 0.8f * fade + 0.2f, 1.0f, 1.0f), "%s", title);
-        if (_bigFont) {
-            ImGui::PopFont();
+        if (_bigFont) ImGui::PushFont(_bigFont);
+        ImGui::TextColored(ImVec4(0.35f, 0.75f * fade + 0.25f, 1.0f, fade), "SNAPFIRE");
+        if (_bigFont) ImGui::PopFont();
+        // Subtitle line below the big title
+        ImGui::SetCursorPosX(0);
+        ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.9f, fade * 0.85f),
+                           "  3D Aim Trainer  |  OpenGL");
+    }
+    ImGui::End();
+
+    // ---- Bottom hint / NICE SHOT (well above bottom edge) ----
+    ImGui::SetNextWindowPos(
+        ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.80f),
+        ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    if (ImGui::Begin("IntroHint", nullptr, flags)) {
+        if (_introHit) {
+            if (_bigFont) ImGui::PushFont(_bigFont);
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.15f, 1.0f), "  NICE SHOT!  ");
+            if (_bigFont) ImGui::PopFont();
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f),
+                               "  entering game...");
+        } else {
+            ImGui::TextColored(ImVec4(0.75f, 0.80f, 0.90f, fade),
+                               "  click the ball to shoot");
+            ImGui::TextColored(ImVec4(0.45f, 0.50f, 0.60f, fade * 0.8f),
+                               "  any key / wait 5s to skip");
         }
     }
     ImGui::End();
 
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.82f),
-                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    if (ImGui::Begin("IntroHint", nullptr, flags)) {
-        const char* hint = "press any key to start   ·   F2 screenshot";
-        ImVec2 sz = ImGui::CalcTextSize(hint);
-        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - sz.x) * 0.5f);
-        ImGui::TextColored(ImVec4(0.7f, 0.75f, 0.8f, fade), "%s", hint);
-        ImGui::TextDisabled("OBJ-sequence mesh animation (base req 7)");
+    // ---- Crosshair (screen center) ----
+    if (!_introHit) {
+        ImVec2 ctr(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
+        ImU32 col = IM_COL32(255, 255, 255, (int)(180 * fade));
+        dl->AddLine(ImVec2(ctr.x - 10, ctr.y), ImVec2(ctr.x - 3, ctr.y), col, 2.0f);
+        dl->AddLine(ImVec2(ctr.x + 3,  ctr.y), ImVec2(ctr.x + 10, ctr.y), col, 2.0f);
+        dl->AddLine(ImVec2(ctr.x, ctr.y - 10), ImVec2(ctr.x, ctr.y - 3),  col, 2.0f);
+        dl->AddLine(ImVec2(ctr.x, ctr.y + 3),  ImVec2(ctr.x, ctr.y + 10), col, 2.0f);
+        dl->AddCircle(ctr, 18.0f, col, 32, 1.0f);
     }
-    ImGui::End();
-    (void)col;
 }
 
 void AimTrainer::captureScreenshot() {
@@ -1308,6 +1684,89 @@ void AimTrainer::captureScreenshot() {
     std::string path = dir + buf;
     stbi_write_png(path.c_str(), w, h, 4, flipped.data(), rowBytes);
     _lastScreenshot = path;
+}
+
+void AimTrainer::initGun() {
+    // Shader
+    _gunShader = std::make_unique<GLSLProgram>();
+    _gunShader->attachVertexShaderFromFile(getAssetFullPath("shaders/gun.vert"));
+    _gunShader->attachFragmentShaderFromFile(getAssetFullPath("shaders/gun.frag"));
+    _gunShader->link();
+
+    // Model (self-written OBJ loader)
+    try {
+        _gunModel = std::make_unique<Model>(getAssetFullPath("models/gun.obj"));
+    } catch (const std::exception&) {
+        // gun.obj missing -> no viewmodel drawn
+    }
+
+    // Textures
+    try {
+        _gunDiffuse  = std::make_unique<ImageTexture2D>(getAssetFullPath("textures/gun-diffuse.jpg"));
+        _gunSpecular = std::make_unique<ImageTexture2D>(getAssetFullPath("textures/gun-specular.jpg"));
+    } catch (const std::exception&) {}
+}
+
+void AimTrainer::drawGun() {
+    if (_camMode != CamMode::FPS || _intro || _scoped || !_gunModel || !_gunShader) {
+        return;
+    }
+
+    glm::vec3 front = _camera.transform.getFront();
+    glm::vec3 right = _camera.transform.getRight();
+    glm::vec3 up    = _camera.transform.getUp();
+
+    // Gun position: lower-right of the screen, close to the camera.
+    glm::vec3 gunPos = _camera.transform.position
+                     + front * 0.35f
+                     + right * 0.22f
+                     + up    * -0.18f;
+
+    // Build rotation: camera axes as columns so the gun aligns with the view.
+    // Then rotate -90° around local X so the barrel (model +Y after the OBJ
+    // convention from Blender) points forward, and 180° around local Z to
+    // flip right-side up.
+    glm::mat4 rot(1.0f);
+    rot[0] = glm::vec4(right,  0.0f);
+    rot[1] = glm::vec4(up,     0.0f);
+    rot[2] = glm::vec4(-front, 0.0f);
+
+    glm::mat4 gunModel = glm::mat4(1.0f);
+    gunModel[3] = glm::vec4(gunPos, 1.0f);
+    gunModel = gunModel * rot;
+
+    // Rotate so the barrel (Z in model space) points along camera front.
+    gunModel = glm::rotate(gunModel, glm::radians(180.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    // Tilt grip downward to look natural in first-person.
+    gunModel = glm::rotate(gunModel, glm::radians(-10.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+    // Apply spring recoil (kick upward = negative X rotation).
+    gunModel = glm::rotate(gunModel, _recoilAngle, glm::vec3(1.0f, 0.0f, 0.0f));
+
+    // gun.obj is ~1 unit long; scale to ~0.28 world units so it fills the
+    // lower-right corner without covering the crosshair.
+    gunModel = glm::scale(gunModel, glm::vec3(0.28f));
+
+    // Use a dedicated projection with a very near plane so the gun never clips.
+    glm::mat4 view = _camera.getViewMatrix();
+    glm::mat4 gunProj = glm::perspective(
+        _camera.fovy,
+        static_cast<float>(_windowWidth) / static_cast<float>(_windowHeight),
+        0.005f, 10.0f);
+
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+
+    _gunShader->use();
+    _gunShader->setUniformMat4("uModel", gunModel);
+    _gunShader->setUniformMat4("uView",  view);
+    _gunShader->setUniformMat4("uProj",  gunProj);
+    _gunShader->setUniformVec3("uViewPos",    _camera.transform.position);
+    _gunShader->setUniformVec3("uLightDir",   glm::normalize(_dir.dir));
+    _gunShader->setUniformVec3("uLightColor", _dir.color * _dir.intensity);
+    if (_gunDiffuse)  { _gunDiffuse->bind(0);  _gunShader->setUniformInt("uDiffuse",  0); }
+    if (_gunSpecular) { _gunSpecular->bind(1); _gunShader->setUniformInt("uSpecular", 1); }
+    _gunModel->draw();
+    _gunShader->unuse();
 }
 
 void AimTrainer::exportSceneObj() {

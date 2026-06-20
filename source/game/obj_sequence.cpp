@@ -13,42 +13,40 @@
 #include <vector>
 
 namespace {
-// Generate one frame of the deforming sphere: a UV sphere whose radius pulses
-// globally and ripples longitudinally, so vertices visibly move between frames
-// (genuine mesh animation, not a transform). `phase` in [0,1).
-// (geometry generator only -- no OpenGL.)
+// Generate one frame of the deforming sphere: two-layer ripple + global pulse,
+// giving a more organic, lively deformation than a single ripple.
 Mesh makeDeformingSphere(float phase) {
-    const int segments = 28;
-    const int rings = 18;
+    const int segments = 32;
+    const int rings    = 22;
     std::vector<Vertex> verts;
     std::vector<uint32_t> idx;
     verts.reserve((segments + 1) * (rings + 1));
 
+    const float PI = 3.14159265358979323846f;
     for (int r = 0; r <= rings; ++r) {
-        float theta = static_cast<float>(M_PI) * r / rings;   // [0, pi]
+        float theta = PI * r / rings;
         float st = std::sin(theta), ct = std::cos(theta);
         for (int s = 0; s <= segments; ++s) {
-            float phi = 2.0f * static_cast<float>(M_PI) * s / segments;  // [0, 2pi]
+            float phi = 2.0f * PI * s / segments;
             float sp = std::sin(phi), cp = std::cos(phi);
-            // global radial pulse + a longitudinal ripple that travels with phase.
-            float pulse = 0.25f * std::sin(phase * 2.0f * static_cast<float>(M_PI));
-            float ripple = 0.14f * std::sin(4.0f * phi + phase * 6.0f) * st;
-            float radius = 1.0f + pulse + ripple;
-            glm::vec3 n(cp * st, ct, sp * st);   // unit sphere normal == position dir
-            verts.push_back(Vertex{n * radius, n, {s / static_cast<float>(segments),
-                                                   r / static_cast<float>(rings)}});
+            float p = phase * 2.0f * PI;
+            // Global pulse
+            float pulse   = 0.18f * std::sin(p);
+            // Two ripple layers travelling in opposite directions
+            float ripple1 = 0.12f * std::sin(4.0f * phi + p * 1.5f) * st;
+            float ripple2 = 0.08f * std::sin(6.0f * theta + p * 2.3f);
+            float radius  = 1.0f + pulse + ripple1 + ripple2;
+            glm::vec3 n(cp * st, ct, sp * st);
+            verts.push_back(Vertex{n * radius, n,
+                {s / (float)segments, r / (float)rings}});
         }
     }
     for (int r = 0; r < rings; ++r) {
         for (int s = 0; s < segments; ++s) {
             uint32_t a = r * (segments + 1) + s;
             uint32_t b = a + segments + 1;
-            idx.push_back(a);
-            idx.push_back(b);
-            idx.push_back(a + 1);
-            idx.push_back(a + 1);
-            idx.push_back(b);
-            idx.push_back(b + 1);
+            idx.push_back(a);   idx.push_back(b);     idx.push_back(a + 1);
+            idx.push_back(a + 1); idx.push_back(b); idx.push_back(b + 1);
         }
     }
     return {verts, idx};

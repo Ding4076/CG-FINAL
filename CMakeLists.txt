@@ -73,6 +73,11 @@ add_custom_command(TARGET ${FINAL_NAME} POST_BUILD
 
 target_link_libraries(${FINAL_NAME} PRIVATE glfw glad glm imgui stb)
 
+# MSVC does not define M_PI by default; _USE_MATH_DEFINES enables it.
+if(MSVC)
+    target_compile_definitions(${FINAL_NAME} PRIVATE _USE_MATH_DEFINES)
+endif()
+
 # miniaudio: single header compiled in exactly one TU (audio.cpp, Task 8).
 # On non-MSVC Windows toolchains, link the system libs miniaudio relies on.
 if(WIN32 AND NOT MSVC)

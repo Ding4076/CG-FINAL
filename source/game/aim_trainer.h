@@ -12,6 +12,7 @@
 #include "nurbs.h"
 #include "obj_sequence.h"
 #include "particle_system.h"
+#include "skybox.h"
 #include "texture2d.h"
 
 #include <glm/glm.hpp>
@@ -99,6 +100,10 @@ private:
     bool _intro = true;
     ObjSequence _introSeq;
     float _introTime = 0.0f;
+    glm::vec3 _introEye{0.0f, 1.7f, 3.6f};  // camera pos this frame (for ray cast)
+    bool  _introHit = false;                  // player shot the intro ball
+    float _introHitTimer = 0.0f;              // countdown after hit before entering game
+    static constexpr float kIntroHitDelay = 1.2f;
 
     bool _screenshotQueued = false;        // F2 pressed -> grab the frame at end of render
     std::string _lastScreenshot;           // last saved PNG path (shown in the UI)
@@ -123,11 +128,69 @@ private:
     std::unique_ptr<Model> _platform;
     std::unique_ptr<Model> _rampLeft;
     std::unique_ptr<Model> _rampRight;
+    std::unique_ptr<Model> _rampBack;   // ramp behind the door for return path
+
+    // Hidden bonus target in the back room.
+    struct BonusTarget {
+        glm::vec3 position{0.0f, 1.5f, -9.5f};
+        float     radius    = 0.9f;
+        bool      alive     = true;
+        float     respawnTimer = 0.0f;
+        static constexpr float kRespawnDelay = 5.0f;
+        int       bonusHits = 0;   // total times hit this session
+    } _bonus;
+
+    // Interactive door in the back wall (bonus: real interaction / state change).
+    // Hinge at x = -1.0, z = -5.0. Swings open on Y axis when shot.
+    struct Door {
+        std::unique_ptr<Model> model;
+        float angle     = 0.0f;   // current open angle (radians, 0 = closed)
+        float angVel    = 0.0f;
+        bool  open      = false;
+        // AABB when fully closed (for shot detection)
+        glm::vec3 hingePos{-1.0f, 2.7f, -5.0f};
+        float w = 2.0f, h = 2.2f, d = 0.12f;
+    } _door;
+
+    std::unique_ptr<SkyBox> _skybox;
+    std::unique_ptr<ImageTexture2D> _groundTex;  // rock texture for floor/walls/crates
+    std::unique_ptr<ImageTexture2D> _wallTex;    // wall texture for platform/ramps
+
+    // Hit flash: the hit target glows white for a short time.
+    int   _hitFlashTarget = -1;
+    float _hitFlashTimer  = 0.0f;
+    static constexpr float kHitFlashDuration = 0.12f;
+
+    // Hit marker: "×" drawn near crosshair for kHitMarkerDuration seconds.
+    float _hitMarkerTimer = 0.0f;
+    static constexpr float kHitMarkerDuration = 0.18f;
+
+    // Dynamic crosshair: expands on fire, springs back.
+    float _crosshairExpand = 0.0f;   // extra gap pixels
+
+    // Floating "+1" score popups.
+    struct FloatingText {
+        glm::vec3 worldPos;
+        float timer;
+        static constexpr float kTotal = 0.75f;
+    };
+    std::vector<FloatingText> _floatingTexts;
 
     std::unique_ptr<GLSLProgram> _bpShader;
     std::unique_ptr<GLSLProgram> _depthShader;
-    std::unique_ptr<GLSLProgram> _scopeShader;   // black outside the scope circle
+    std::unique_ptr<GLSLProgram> _scopeShader;
+    std::unique_ptr<GLSLProgram> _gunShader;
     std::unique_ptr<FullscreenQuad> _fullscreenQuad;
+
+    // Viewmodel gun
+    std::unique_ptr<Model>        _gunModel;
+    std::unique_ptr<ImageTexture2D> _gunDiffuse;
+    std::unique_ptr<ImageTexture2D> _gunSpecular;
+    float _recoilAngle   = 0.0f;   // current recoil pitch (radians, positive = kick up)
+    float _recoilVel     = 0.0f;   // spring velocity
+    static constexpr float kRecoilKick    = 2.4f;   // radians kick per shot
+    static constexpr float kRecoilSpring  = 90.0f;  // spring stiffness
+    static constexpr float kRecoilDamping = 28.0f;  // damping
 
     // Shadow map resources.
     std::unique_ptr<Texture2D> _shadowTex;
@@ -196,8 +259,10 @@ private:
     void initPrimitives();
     void initArena();
     void initShadowMap();
+    void initGun();
     void setLightUniforms();
     void drawImGui();
+    void drawGun();
     BoundingBox sceneBounds() const;
     void switchMode(CamMode mode);
     void updateLightSpaceMatrix();

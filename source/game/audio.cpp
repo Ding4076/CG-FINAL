@@ -9,7 +9,7 @@
 
 struct Audio::Impl {
     ma_engine engine;
-    std::map<std::string, ma_sound*> sounds;
+    std::map<std::string, std::string> paths;  // name -> filepath
     bool engineOk = false;
 };
 
@@ -17,12 +17,6 @@ Audio::Audio() : _impl(new Impl()) {}
 
 Audio::~Audio() {
     if (_impl) {
-        for (auto& kv : _impl->sounds) {
-            if (kv.second) {
-                ma_sound_uninit(kv.second);
-                delete kv.second;
-            }
-        }
         if (_impl->engineOk) {
             ma_engine_uninit(&_impl->engine);
         }
@@ -43,27 +37,16 @@ bool Audio::init() {
 }
 
 bool Audio::load(const std::string& name, const std::string& filepath) {
-    if (!_ok) {
-        return false;
-    }
-    ma_sound* s = new ma_sound();
-    if (ma_sound_init_from_file(&_impl->engine, filepath.c_str(), 0, nullptr, nullptr, s) !=
-        MA_SUCCESS) {
-        delete s;
-        return false;
-    }
-    _impl->sounds[name] = s;
+    if (!_ok) return false;
+    _impl->paths[name] = filepath;
     return true;
 }
 
 void Audio::play(const std::string& name) {
-    if (!_ok) {
-        return;
-    }
-    auto it = _impl->sounds.find(name);
-    if (it == _impl->sounds.end() || !it->second) {
-        return;
-    }
-    ma_sound_seek_to_pcm_frame(it->second, 0);
-    ma_sound_start(it->second);
+    if (!_ok) return;
+    auto it = _impl->paths.find(name);
+    if (it == _impl->paths.end()) return;
+    // ma_engine_play_sound spawns a fire-and-forget sound each call,
+    // which works correctly for both WAV and MP3 without seek issues.
+    ma_engine_play_sound(&_impl->engine, it->second.c_str(), nullptr);
 }
