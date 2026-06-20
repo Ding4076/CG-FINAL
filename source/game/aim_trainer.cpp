@@ -91,8 +91,8 @@ AimTrainer::AimTrainer(const Options& options)
     if (_audioOk) {
         std::string sfx = getAssetFullPath("sounds/");
         // Each load fails silently (returns false) if the file is missing.
-        _audio.load("pistol", sfx + "pistol.mp3");
-        _audio.load("sniper", sfx + "sniper.mp3");
+        _audio.load("pistol", sfx + "pistol.wav");
+        _audio.load("sniper", sfx + "sniper.wav");
         _audio.load("pop",    sfx + "pop.wav");
     }
 
