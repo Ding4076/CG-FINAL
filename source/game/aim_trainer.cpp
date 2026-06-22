@@ -603,7 +603,7 @@ void AimTrainer::handleInput() {
                 _introHit = true;
                 _introHitTimer = kIntroHitDelay;
                 _particles.burst(target, glm::vec3(0.4f, 0.8f, 1.0f), 80, 8.0f, 1.5f, 16.0f);
-                _particles.burst(target, glm::vec3(1.0f, 1.0f, 0.9f), 40, 14.0f, 0.5f, 10.0f);
+                _particles.burst(target, glm::vec3(1.0f, 1.0f, 0.9f), 40, 7.0f, 1.0f, 10.0f);
                 _particles.burst(target, glm::vec3(0.2f, 0.5f, 0.9f), 20, 2.5f, 2.5f, 22.0f);
                 if (_audioOk) _audio.play("pop");
                 _input.forwardState();
@@ -1263,8 +1263,8 @@ void AimTrainer::tryFire() {
             _hitMarkerTimer = kHitMarkerDuration;
             // Giant golden explosion
             _particles.burst(_bonus.position, glm::vec3(1.0f, 0.85f, 0.1f), 120, 12.0f, 2.0f, 20.0f);
-            _particles.burst(_bonus.position, glm::vec3(1.0f, 0.5f, 0.05f),  60, 18.0f, 0.8f, 14.0f);
-            _particles.burst(_bonus.position, glm::vec3(1.0f, 1.0f, 0.6f),   40, 22.0f, 0.3f,  8.0f);
+            _particles.burst(_bonus.position, glm::vec3(1.0f, 0.5f, 0.05f),  60, 18.0f, 1.2f, 14.0f);
+            _particles.burst(_bonus.position, glm::vec3(1.0f, 1.0f, 0.6f),   40, 8.0f,  1.5f,  8.0f);
             if (_audioOk) _audio.play("pop");
             // Three "+1" floaters at slightly different offsets
             for (int i = 0; i < 3; ++i) {
@@ -1282,11 +1282,11 @@ void AimTrainer::tryFire() {
         _floatingTexts.push_back({_targets[best].position, FloatingText::kTotal});
         _targets[best].alive = false;
         // Main burst: hot orange-red, large and fast.
-        _particles.burst(_targets[best].position, glm::vec3(1.0f, 0.35f, 0.05f), 80, 9.0f, 1.4f, 16.0f);
-        // Core flash: bright yellow-white sparks.
-        _particles.burst(_targets[best].position, glm::vec3(1.0f, 0.95f, 0.4f),  40, 15.0f, 0.35f, 10.0f);
+        _particles.burst(_targets[best].position, glm::vec3(1.0f, 0.35f, 0.05f), 80, 9.0f, 1.6f, 16.0f);
+        // Core flash: bright yellow-white sparks (visible ~1s so 3 layers overlap).
+        _particles.burst(_targets[best].position, glm::vec3(1.0f, 0.95f, 0.4f),  40, 8.0f, 1.0f, 10.0f);
         // Ember drift: slow deep-red embers that linger.
-        _particles.burst(_targets[best].position, glm::vec3(0.9f, 0.2f, 0.05f),  20, 2.5f,  2.2f,  22.0f);
+        _particles.burst(_targets[best].position, glm::vec3(0.9f, 0.2f, 0.05f),  20, 2.5f,  3.0f,  22.0f);
         if (_audioOk) {
             _audio.play("pop");
         }
