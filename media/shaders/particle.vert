@@ -1,8 +1,8 @@
 #version 330 core
-// Particle point sprite. Each particle is a GL_POINT with a per-vertex color;
-// the fragment shader draws a soft disc.
+// Particle point sprite with per-particle size (location 2).
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aColor;
+layout (location = 2) in float aSize;
 
 uniform mat4 uView;
 uniform mat4 uProj;
@@ -13,6 +13,7 @@ void main() {
     vColor = aColor;
     vec4 viewPos = uView * vec4(aPos, 1.0);
     gl_Position = uProj * viewPos;
-    // Size shrinks with distance for a basic perspective effect.
-    gl_PointSize = clamp(300.0 / -viewPos.z, 2.0, 40.0);
+    // Per-particle point radius with distance falloff — large particles
+    // read big and slow, small ones tight and fast, layered depth.
+    gl_PointSize = aSize;
 }

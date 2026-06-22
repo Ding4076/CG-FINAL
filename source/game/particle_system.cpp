@@ -40,12 +40,16 @@ void ParticleSystem::initGL() {
     glGenBuffers(1, &_vbo);
     glBindVertexArray(_vao);
     glBindBuffer(GL_ARRAY_BUFFER, _vbo);
-    // position (vec3) + color (vec3) per particle
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(float) * 6, (void*)0);
+    // position (vec3) + color (vec3) + size (float) per particle — 7 floats
+    const size_t stride = sizeof(float) * 7;
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, (GLsizei)stride, (void*)0);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(float) * 6,
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, (GLsizei)stride,
                           (void*)(sizeof(float) * 3));
     glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, (GLsizei)stride,
+                          (void*)(sizeof(float) * 6));
+    glEnableVertexAttribArray(2);
     glBindVertexArray(0);
     _inited = true;
 }
@@ -63,18 +67,20 @@ void ParticleSystem::draw(const glm::mat4& view, const glm::mat4& proj,
         _shader->link();
     }
 
-    // Build the interleaved vertex data, fading alpha by remaining life.
+    // Build interleaved vertex data: pos(3) + color(3) + size(1) = 7 floats.
+    // Color fades with remaining life so dying particles dim out.
     std::vector<float> data;
-    data.reserve(_particles.size() * 6);
-    float alpha = 1.0f;  // per-frame global alpha is 1; per-particle via color scale
+    data.reserve(_particles.size() * 7);
+    float alpha = 1.0f;
     for (const auto& p : _particles) {
-        float f = p.life / p.maxLife;   // 0..1
+        float f = p.life / p.maxLife;   // 1..0, fading to black
         data.push_back(p.pos.x);
         data.push_back(p.pos.y);
         data.push_back(p.pos.z);
         data.push_back(p.color.r * f);
         data.push_back(p.color.g * f);
         data.push_back(p.color.b * f);
+        data.push_back(p.size);        // per-particle point radius
     }
 
     glBindBuffer(GL_ARRAY_BUFFER, _vbo);
