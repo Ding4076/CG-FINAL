@@ -773,7 +773,11 @@ void AimTrainer::updateSpotSpaceMatrix() {
     glm::vec3 pos = s.position;
     glm::vec3 dir = glm::normalize(s.direction);
     glm::vec3 target = pos + dir;   // look along the spot direction
-    glm::mat4 view = glm::lookAt(pos, target, glm::vec3(0.0f, 1.0f, 0.0f));
+    // glm::lookAt(eye,center,up) degenerates when forward is parallel to up.
+    // The arena spot points straight down dir=(0,-1,0) so up=(0,1,0) is
+    // antiparallel -> cross product zero -> undefined matrix. Use (0,0,1) as
+    // the shadow-map "up" so the right-vector is well-defined.
+    glm::mat4 view = glm::lookAt(pos, target, glm::vec3(0.0f, 0.0f, 1.0f));
     // FOV = 2 * cone half-angle, plus margin.
     float halfDeg = glm::degrees(std::acos(s.cosAngle));
     float fovy = glm::radians(halfDeg * 2.0f + 8.0f);
